@@ -1,107 +1,100 @@
 import pandas as pd
 from sqlalchemy import create_engine, Column, Integer, String, MetaData, Table, Float
 import os
+import logging
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Чтение Excel файла
-file_path = '/home/alexey/Документы/ДТОиР/Инфа от ПО ЭКС 12.08.2024/МТР подрядчика 2024.xlsx'  # Замените на путь к вашему Excel файлу
-sheet_name = '2024'  # Укажите имя листа, если нужно
+file_path = '/home/alexey/Документы/ДТОиР/Инфа от ПО ЭКС 12.08.2024/МТР подрядчика 2024.xlsx'
+sheet_name = '2024'
 
-# Чтение первых нескольких строк, чтобы найти строку с заголовками
-preview_df = pd.read_excel(file_path, sheet_name=sheet_name, header=None, nrows=10)
+# Проверка наличия файла
+if not os.path.exists(file_path):
+    logger.error(f"Файл {file_path} не найден.")
+    raise FileNotFoundError(f"Файл {file_path} не найден.")
+
+# Предварительное чтение первых строк для нахождения строки заголовков
+try:
+    preview_df = pd.read_excel(file_path, sheet_name=sheet_name, header=None, nrows=10)
+except Exception as e:
+    logger.error(f"Ошибка при чтении файла {file_path}: {e}")
+    raise
 
 # Функция для поиска строки заголовков
 def find_header_row(df):
     for i, row in df.iterrows():
-        if row.dropna().apply(lambda x: isinstance(x, str) and x.strip() != '').count() > 2:  # Условие: больше двух не пустых строковых значений
+        if row.dropna().apply(lambda x: isinstance(x, str) and x.strip() != '').count() > 2:
             return i
     return None
 
 header_row_index = find_header_row(preview_df)
 
 if header_row_index is None:
+    logger.error("Не удалось найти строку с заголовками.")
     raise ValueError("Не удалось найти строку с заголовками.")
 
-# Чтение файла снова, теперь используя найденные заголовки
-df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row_index)
+logger.info(f"Заголовки найдены на строке {header_row_index + 1}.")
 
-# Удаление столбцов с названиями 'Unnamed'
+# Чтение файла снова с использованием найденных заголовков
+try:
+    df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row_index)
+except Exception as e:
+    logger.error(f"Ошибка при чтении файла {file_path} с заголовками: {e}")
+    raise
+
+# Удаление ненужных столбцов и очистка данных
 df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
-
-# Удаление столбцов, содержащих только пустые значения
 df = df.dropna(axis=1, how='all')
-
-# Удаление апострофов из всех строковых данных
 df = df.apply(lambda col: col.map(lambda x: x.replace("'", "") if isinstance(x, str) else x))
 
-# Определение столбцов с датами и числами
+# Определение типов столбцов
 def identify_column_types(df):
     date_columns = []
     numeric_columns = []
-
     for col in df.columns:
-        # Попытка преобразовать в datetime
         try:
             converted_dates = pd.to_datetime(df[col], format='%d.%m.%Y', errors='coerce')
-            if not converted_dates.isna().all():  # Проверяем, есть ли успешные преобразования
+            if not converted_dates.isna().all():
                 date_columns.append(col)
-                df[col] = converted_dates.dt.strftime('%Y-%m-%d')  # Преобразуем даты в строку формата 'YYYY-MM-DD'
+                df[col] = converted_dates.dt.strftime('%Y-%m-%d')
         except Exception as e:
-            print(f"Error processing column {col} for date: {e}")
+            logger.warning(f"Ошибка при обработке столбца {col} как даты: {e}")
 
-        # Попытка преобразовать в числовой тип
         try:
             converted_numbers = pd.to_numeric(df[col], errors='coerce')
-            if not converted_numbers.isna().all():  # Проверяем, есть ли успешные преобразования
+            if not converted_numbers.isna().all():
                 numeric_columns.append(col)
                 df[col] = converted_numbers
         except Exception as e:
-            print(f"Error processing column {col} for number: {e}")
+            logger.warning(f"Ошибка при обработке столбца {col} как числа: {e}")
 
     return date_columns, numeric_columns
 
 date_columns, numeric_columns = identify_column_types(df)
 
-# Вывод найденных столбцов
-print("Найденные столбцы с датами:")
-print(date_columns)
+logger.info(f"Найденные столбцы с датами: {date_columns}")
+logger.info(f"Найденные столбцы с числами: {numeric_columns}")
 
-print("\nНайденные столбцы с числами:")
-print(numeric_columns)
+# Создание SQLAlchemy engine с использованием контекстного менеджера
+db_url = 'sqlite:///your_database.db'
+with create_engine(db_url).connect() as connection:
+    metadata = MetaData()
+    table_name = os.path.splitext(os.path.basename(file_path))[0].replace(" ", "_").lower()
 
-# Создание SQLAlchemy engine
-db_url = 'sqlite:///your_database.db'  # Замените на ваш путь к базе данных или строку подключения
-engine = create_engine(db_url)
+    sql_types = {col: String() if col in date_columns else
+                 Integer() if pd.api.types.is_integer_dtype(df[col]) else
+                 Float() if pd.api.types.is_float_dtype(df[col]) else
+                 String() for col in df.columns}
 
-# Определение типа данных для столбцов SQLAlchemy
-def get_sql_types(df, date_columns):
-    sql_types = {}
-    for col in df.columns:
-        if col in date_columns:
-            sql_types[col] = String()  # Используем String для столбцов с датами
-        elif pd.api.types.is_integer_dtype(df[col]):
-            sql_types[col] = Integer()
-        elif pd.api.types.is_float_dtype(df[col]):
-            sql_types[col] = Float()
-        else:
-            sql_types[col] = String()
-    return sql_types
+    table = Table(
+        table_name, metadata,
+        *[Column(col, sql_types[col]) for col in df.columns]
+    )
+    metadata.create_all(connection)
 
-sql_types = get_sql_types(df, date_columns)
+    df.to_sql(table_name, con=connection, if_exists='replace', index=False)
 
-# Извлечение имени файла без расширения и преобразование его в название таблицы
-table_name = os.path.splitext(os.path.basename(file_path))[0].replace(" ", "_").lower()
-
-# Создание таблицы с нужными типами данных
-metadata = MetaData()
-table = Table(
-    table_name, metadata,  # Используем table_name, полученное из имени файла
-    *[Column(col, sql_types[col]) for col in df.columns]
-)
-
-# Создание таблицы в базе данных
-metadata.create_all(engine)
-
-# Запись данных в базу данных
-df.to_sql(table_name, con=engine, if_exists='replace', index=False)
-
-print(f"Данные успешно сохранены в таблицу '{table_name}'")
+logger.info(f"Данные успешно сохранены в таблицу '{table_name}'")
