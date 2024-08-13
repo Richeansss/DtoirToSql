@@ -5,7 +5,30 @@ import os
 # Чтение Excel файла
 file_path = '/home/alexey/Документы/ДТОиР/Инфа от ПО ЭКС 12.08.2024/МТР подрядчика 2024.xlsx'  # Замените на путь к вашему Excel файлу
 sheet_name = '2024'  # Укажите имя листа, если нужно
-df = pd.read_excel(file_path, sheet_name=sheet_name)
+
+# Чтение первых нескольких строк, чтобы найти строку с заголовками
+preview_df = pd.read_excel(file_path, sheet_name=sheet_name, header=None, nrows=10)
+
+# Функция для поиска строки заголовков
+def find_header_row(df):
+    for i, row in df.iterrows():
+        if row.dropna().apply(lambda x: isinstance(x, str) and x.strip() != '').count() > 2:  # Условие: больше двух не пустых строковых значений
+            return i
+    return None
+
+header_row_index = find_header_row(preview_df)
+
+if header_row_index is None:
+    raise ValueError("Не удалось найти строку с заголовками.")
+
+# Чтение файла снова, теперь используя найденные заголовки
+df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row_index)
+
+# Удаление столбцов с названиями 'Unnamed'
+df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+
+# Удаление столбцов, содержащих только пустые значения
+df = df.dropna(axis=1, how='all')
 
 # Удаление апострофов из всех строковых данных
 df = df.apply(lambda col: col.map(lambda x: x.replace("'", "") if isinstance(x, str) else x))
